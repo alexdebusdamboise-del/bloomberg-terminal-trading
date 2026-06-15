@@ -44,10 +44,17 @@ python3 server.py --host 0.0.0.0 --port 8765
 **3) Put it online (public link).** Because of the data proxy it needs a
 Python host (not a static site). Free options that work as-is:
 
-- **Render.com / Railway.app**: new Web Service from a GitHub repo, build
-  command *(none)*, start command `python3 server.py`. They set `$PORT`
-  automatically (the server already reads it).
-- **Replit / PythonAnywhere**: upload the folder, run `python3 server.py`.
+- **Render.com (one-click):** this repo ships a `render.yaml` blueprint. In
+  Render: **New + → Blueprint → connect this repo → Apply**. It runs
+  `python3 server.py --host 0.0.0.0` and sets `$PORT` automatically. You get a
+  public `https://<name>.onrender.com` URL.
+- **Railway.app:** new project from the repo, start command
+  `python3 server.py --host 0.0.0.0`.
+- **Replit / PythonAnywhere:** upload the folder, run `python3 server.py`.
+
+> **Netlify / Vercel won't work as-is** — they host static sites + JS/Go
+> serverless functions, not a persistent Python server. Use a Python host
+> (above), or the backend would need rewriting as Node serverless functions.
 
 Add a `TWELVEDATA_API_KEY` environment variable on the host (instead of
 `config.json`) if you want analyst/earnings data in the deployed version.

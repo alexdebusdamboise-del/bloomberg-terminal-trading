@@ -1,0 +1,15 @@
+# One-click deploy on Render (https://render.com) — runs the Python server as-is.
+# In Render: New + → Blueprint → connect this GitHub repo → Apply.
+services:
+  - type: web
+    name: bloomberg-terminal
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 server.py --host 0.0.0.0
+    autoDeploy: true
+    envVars:
+      # Optional: paste a free Twelve Data key for charts/analyst/earnings.
+      # Leave unset and the app still works (CNBC + Yahoo + Google News).
+      - key: TWELVEDATA_API_KEY
+        sync: false
