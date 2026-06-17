@@ -12,6 +12,9 @@ services:
       # Twelve Data key -> charts, fundamentals, analyst forecasts, stock sparklines.
       - key: TWELVEDATA_API_KEY
         sync: false
-      # Free CoinGecko "Demo" key -> reliable crypto data from datacenter IPs.
+      # Finnhub key -> real-time US stocks / indices / commodities WebSocket.
+      - key: FINNHUB_API_KEY
+        sync: false
+      # Free CoinGecko "Demo" key -> reliable crypto data from datacenter IPs (optional).
       - key: COINGECKO_API_KEY
         sync: false
