@@ -1158,10 +1158,51 @@
     }
   }, 6000);
 
+  // ---------------- live crypto via Binance WebSocket (real-time ticking) ----------------
+  const wsLastPx = {}, wsThrottle = {};
+  function binanceStream(sym) { return sym.slice(0, -4).toLowerCase() + "usdt"; }   // BTC-USD -> btcusdt
+  function streamToSym(s) { return s.replace(/USDT$/, "").toUpperCase() + "-USD"; } // BTCUSDT -> BTC-USD
+  function applyLiveCrypto(sym, price, pct, chg) {
+    if (price == null || isNaN(price)) return;
+    const now = Date.now();
+    if (now - (wsThrottle[sym] || 0) < 650) return;   // throttle DOM updates (~1.5/s)
+    wsThrottle[sym] = now;
+    const dp = decimalsFor(sym, price), cls = pct > 0 ? "up" : pct < 0 ? "down" : "flat";
+    const fl = flashClass(wsLastPx[sym], price); wsLastPx[sym] = price;
+    document.querySelectorAll('.qrow[data-sym="' + (window.CSS && CSS.escape ? CSS.escape(sym) : sym) + '"]').forEach((row) => {
+      const last = row.querySelector(".q-last");
+      if (last) { last.textContent = fmtNum(price, dp); if (fl) { last.classList.remove("flash-up", "flash-down"); void last.offsetWidth; last.classList.add(fl); } }
+      const pctEl = row.querySelector(".q-pct");
+      if (pctEl) { pctEl.className = "q-pct " + cls + (fl ? " " + fl : ""); pctEl.textContent = (pct > 0 ? "▲" : pct < 0 ? "▼" : "·") + " " + fmtPct(pct); }
+      const chgEl = row.querySelector(".q-chg");
+      if (chgEl && chg != null && !isNaN(chg)) { chgEl.className = "q-chg " + cls; chgEl.textContent = (chg >= 0 ? "+" : "") + fmtNum(chg, dp); }
+    });
+    if (state.view === "sec" && state.symbol === sym) {
+      const hfl = flashClass(state.lastHeaderPx, price); state.lastHeaderPx = price;
+      $("#sh-last").innerHTML = `<span class="${cls} ${hfl || ""}">${fmtNum(price, dp)}</span>`;
+      $("#sh-chg").innerHTML = `<span class="${cls}">${chg >= 0 ? "+" : ""}${fmtNum(chg, dp)} (${fmtPct(pct)})</span>`;
+    }
+  }
+  function connectBinanceWS() {
+    let ws;
+    try {
+      const streams = GROUPS.CRYPTO.map((s) => binanceStream(s) + "@ticker").join("/");
+      ws = new WebSocket("wss://stream.binance.com:9443/stream?streams=" + streams);
+    } catch (e) { setTimeout(connectBinanceWS, 8000); return; }
+    ws.onmessage = (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      const d = m && m.data; if (!d || !d.s) return;
+      applyLiveCrypto(streamToSym(d.s), parseFloat(d.c), parseFloat(d.P), parseFloat(d.p));
+    };
+    ws.onclose = () => setTimeout(connectBinanceWS, 5000);   // auto-reconnect
+    ws.onerror = () => { try { ws.close(); } catch (e) {} };
+  }
+
   // ---------------- boot ----------------
   buildChartControls();
   showView("home");
   loadNews($("#homenews"), "stock market");
+  connectBinanceWS();
   $("#cmd").focus();
   window.__loadSecurity = loadSecurity; // debug hook
 })();

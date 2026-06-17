@@ -846,6 +846,39 @@ def _coingecko_markets(symbols):
     return out
 
 
+def _binance_quotes(symbols):
+    """Real-time crypto price + 24h % from Binance (high rate limit, ticks
+    continuously). Cached 3s so polling shows live movement."""
+    pairs = [(s, s[:-4] + "USDT") for s in symbols if s.endswith("-USD") and s in CG_IDS]
+    if not pairs:
+        return {}
+    ck = "binance:" + ",".join(sorted(p[1] for p in pairs))
+    data = CACHE.get(ck)
+    if data is None:
+        bsyms = "[" + ",".join('"%s"' % p[1] for p in pairs) + "]"
+        try:
+            data = _json_get("https://api.binance.com/api/v3/ticker/24hr?symbols=" + urllib.parse.quote(bsyms))
+            if isinstance(data, list):
+                CACHE.set(ck, data, 3)
+        except Exception:
+            data = None
+    if not isinstance(data, list):
+        return {}
+    b2sym = {p[1]: p[0] for p in pairs}
+    out = {}
+    for t in data:
+        sym = b2sym.get(t.get("symbol"))
+        if not sym:
+            continue
+        try:
+            price = float(t["lastPrice"]); chgpct = float(t["priceChangePercent"]); chg = float(t["priceChange"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        prev = price - chg
+        out[sym] = {"price": price, "changePct": chgpct, "change": chg, "prev": prev}
+    return out
+
+
 def _coingecko_chart(symbol, rng, interval="1d", full=False):
     cid = CG_IDS[symbol]
     days = "max" if (full and interval in ("1d", "1wk", "1mo")) else CG_DAYS.get(rng, 365)
@@ -925,16 +958,30 @@ def fetch_quotes(symbols):
     # 1) crypto -> CoinGecko markets (accurate 24h %, market cap, real sparkline)
     crypto = [s for s in symbols if _is_crypto(s)]
     if crypto:
+        bz = {}
+        try:
+            bz = _binance_quotes(crypto)      # real-time price + 24h % (cache 3s)
+        except Exception:
+            bz = {}
         cg = {}
         try:
-            cg = _coingecko_markets(crypto)
+            cg = _coingecko_markets(crypto)   # market cap + 7d sparkline (cache 45s)
         except Exception:
             cg = {}
         for s in crypto:
+            base = cg.get(s) or _CG_LAST_GOOD.get(s)
+            q = dict(base) if base else None
+            if s in bz:                       # prefer Binance for live price/%
+                if q is None:
+                    q = {"symbol": s, "shortName": s.replace("-USD", ""), "currency": "USD",
+                         "exchange": "Crypto", "marketCap": None, "volume": None,
+                         "fiftyTwoWeekHigh": None, "fiftyTwoWeekLow": None, "spark": []}
+                q["price"] = bz[s]["price"]; q["changePct"] = bz[s]["changePct"]
+                q["change"] = bz[s]["change"]; q["previousClose"] = bz[s]["prev"]; q["source"] = "live"
+            if q is not None and q.get("price") is not None:
+                out[s] = q
             if s in cg:
-                out[s] = cg[s]
-            elif s in _CG_LAST_GOOD:
-                out[s] = dict(_CG_LAST_GOOD[s])   # CoinGecko busy -> last correct value (never wrong CNBC %)
+                _CG_LAST_GOOD[s] = cg[s]
     # 2) everything else -> CNBC real-time batch (crypto stays on CoinGecko/sim, never CNBC)
     rest = [s for s in symbols if s not in out and not _is_crypto(s)]
     if rest:
@@ -954,7 +1001,7 @@ def fetch_quotes(symbols):
                 except Exception:
                     out[s] = {"symbol": s, "error": True}
     ordered = [out[s] for s in symbols if s in out]
-    CACHE.set(key, ordered, 5)
+    CACHE.set(key, ordered, 3)
     return ordered
 
 
