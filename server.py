@@ -245,6 +245,7 @@ CRUMB = Crumb()
 def _load_keys():
     td = os.environ.get("TWELVEDATA_API_KEY", "").strip()
     fh = os.environ.get("FINNHUB_API_KEY", "").strip()
+    cg = os.environ.get("COINGECKO_API_KEY", "").strip()
     cfg = os.path.join(ROOT, "config.json")
     if os.path.exists(cfg):
         try:
@@ -252,11 +253,12 @@ def _load_keys():
                 j = json.load(f)
             td = td or (j.get("twelvedata_key") or "").strip()
             fh = fh or (j.get("finnhub_key") or "").strip()
+            cg = cg or (j.get("coingecko_key") or "").strip()
         except Exception:
             pass
-    return td, fh
+    return td, fh, cg
 
-TD_KEY, FH_KEY = _load_keys()
+TD_KEY, FH_KEY, CG_KEY = _load_keys()
 
 TD_MAP = {  # yahoo range -> (td interval, outputsize, intraday)
     "1d": ("5min", 78, True), "5d": ("30min", 170, True), "1mo": ("1day", 23, False),
@@ -796,7 +798,7 @@ def _is_crypto(sym):
     return sym in CG_IDS
 
 
-CG_KEY = os.environ.get("COINGECKO_API_KEY", "").strip()   # optional free Demo key (helps on datacenter/Render IPs)
+# CG_KEY (optional free Demo key — helps on datacenter/Render IPs) is loaded above via _load_keys().
 
 
 def _cg_get(path):
@@ -894,6 +896,11 @@ def _coingecko_markets(symbols):
     return out
 
 
+# Binance market-data mirror: same data as api.binance.com but NOT geo-blocked
+# from datacenter/US IPs (api.binance.com returns HTTP 451 there, e.g. Render).
+BINANCE_API = "https://data-api.binance.vision"
+
+
 def _binance_quotes(symbols):
     """Real-time crypto price + 24h % from Binance (high rate limit, ticks
     continuously). Cached 3s so polling shows live movement."""
@@ -905,7 +912,7 @@ def _binance_quotes(symbols):
     if data is None:
         bsyms = "[" + ",".join('"%s"' % p[1] for p in pairs) + "]"
         try:
-            data = _json_get("https://api.binance.com/api/v3/ticker/24hr?symbols=" + urllib.parse.quote(bsyms))
+            data = _json_get(BINANCE_API + "/api/v3/ticker/24hr?symbols=" + urllib.parse.quote(bsyms))
             if isinstance(data, list):
                 CACHE.set(ck, data, 3)
         except Exception:
@@ -924,6 +931,36 @@ def _binance_quotes(symbols):
             continue
         prev = price - chg
         out[sym] = {"price": price, "changePct": chgpct, "change": chg, "prev": prev}
+    return out
+
+
+def _binance_spark(symbols):
+    """7-day mini sparkline per crypto from Binance klines — works where CoinGecko
+    is rate-limited (datacenter/Render IPs). Cached 10min (shape changes slowly)."""
+    pairs = [(s, s[:-4] + "USDT") for s in symbols if s.endswith("-USD") and s in CG_IDS]
+    out = {}
+
+    def one(pair):
+        s, b = pair
+        sp = CACHE.get("bspark:" + b)
+        if sp is None:
+            try:
+                kl = _json_get(BINANCE_API + "/api/v3/klines?symbol=" + b + "&interval=2h&limit=84")
+                sp = _downsample([float(k[4]) for k in kl]) if isinstance(kl, list) else []
+            except Exception:
+                sp = []
+            CACHE.set("bspark:" + b, sp, 600)
+        return s, sp
+
+    if not pairs:
+        return out
+    try:
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            for s, sp in ex.map(one, pairs):
+                if sp:
+                    out[s] = sp
+    except Exception:
+        pass
     return out
 
 
@@ -1016,6 +1053,15 @@ def fetch_quotes(symbols):
             cg = _coingecko_markets(crypto)   # market cap + 7d sparkline (cache 45s)
         except Exception:
             cg = {}
+        # CoinGecko is rate-limited from datacenter IPs (Render) -> build the
+        # 7-day sparkline from Binance klines for any coin CoinGecko didn't cover.
+        need_spark = [s for s in crypto if not (cg.get(s) or {}).get("spark")]
+        bsp = {}
+        if need_spark:
+            try:
+                bsp = _binance_spark(need_spark)
+            except Exception:
+                bsp = {}
         for s in crypto:
             base = cg.get(s) or _CG_LAST_GOOD.get(s)
             q = dict(base) if base else None
@@ -1026,6 +1072,8 @@ def fetch_quotes(symbols):
                          "fiftyTwoWeekHigh": None, "fiftyTwoWeekLow": None, "spark": []}
                 q["price"] = bz[s]["price"]; q["changePct"] = bz[s]["changePct"]
                 q["change"] = bz[s]["change"]; q["previousClose"] = bz[s]["prev"]; q["source"] = "live"
+            if q is not None and not q.get("spark") and s in bsp:
+                q["spark"] = bsp[s]           # Binance fallback sparkline
             if q is not None and q.get("price") is not None:
                 out[s] = q
             if s in cg:
