@@ -192,6 +192,7 @@
   const prevPx = {};
   const sparkBuf = {};           // per-symbol rolling buffer of live ticks (fallback)
   const sparkData = {};          // per-symbol REAL recent series (crypto 7d / stock 5d)
+  const prevCloseMap = {};       // per-symbol previous close (for live % from WS trades)
   const SPARK_MAX = 40;
   function pushSpark(sym, px) {
     if (px == null) return;
@@ -249,7 +250,7 @@
       const ck = container.id || container.dataset.grid || "g";
       const prev = prevPx[ck] || (prevPx[ck] = {});
       const scroll = container.scrollTop;
-      quotes.forEach((q) => { if (q.spark && q.spark.length >= 2) sparkData[q.symbol] = q.spark; pushSpark(q.symbol, q.price); }); // real series (crypto) + tick fallback
+      quotes.forEach((q) => { if (q.spark && q.spark.length >= 2) sparkData[q.symbol] = q.spark; if (q.previousClose != null) prevCloseMap[q.symbol] = q.previousClose; pushSpark(q.symbol, q.price); });
       const rows = quotes.map((q) => quoteRow(q, opts, prev[q.symbol])).join("");
       container.innerHTML = tableHead(opts.spark) + rows;
       container.scrollTop = scroll;
@@ -547,6 +548,7 @@
     const sym = d.symbol;
     const price = d.regularMarketPrice != null ? d.regularMarketPrice : (d.candles.length ? d.candles[d.candles.length - 1].c : null);
     const prev = d.previousClose;
+    if (prev != null) prevCloseMap[sym] = prev;
     const chg = price != null && prev != null ? price - prev : null;
     const pct = chg != null && prev ? (chg / prev) * 100 : null;
     const dp = decimalsFor(sym, price);
@@ -1162,7 +1164,7 @@
   const wsLastPx = {}, wsThrottle = {};
   function binanceStream(sym) { return sym.slice(0, -4).toLowerCase() + "usdt"; }   // BTC-USD -> btcusdt
   function streamToSym(s) { return s.replace(/USDT$/, "").toUpperCase() + "-USD"; } // BTCUSDT -> BTC-USD
-  function applyLiveCrypto(sym, price, pct, chg) {
+  function applyLiveTick(sym, price, pct, chg) {
     if (price == null || isNaN(price)) return;
     const now = Date.now();
     if (now - (wsThrottle[sym] || 0) < 650) return;   // throttle DOM updates (~1.5/s)
@@ -1192,9 +1194,39 @@
     ws.onmessage = (ev) => {
       let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
       const d = m && m.data; if (!d || !d.s) return;
-      applyLiveCrypto(streamToSym(d.s), parseFloat(d.c), parseFloat(d.P), parseFloat(d.p));
+      applyLiveTick(streamToSym(d.s), parseFloat(d.c), parseFloat(d.P), parseFloat(d.p));
     };
     ws.onclose = () => setTimeout(connectBinanceWS, 5000);   // auto-reconnect
+    ws.onerror = () => { try { ws.close(); } catch (e) {} };
+  }
+
+  // ---------------- live stocks via Finnhub WebSocket (US market hours) ----------------
+  function isStockSym(s) { return /^[A-Z.]{1,6}$/.test(s) && !/-USD$/.test(s); }   // plain US tickers + ADRs (excludes ^index, =X fx, =F futures, rates)
+  function finnhubSymbols() {
+    const set = new Set([].concat(GROUPS.EQUITY, GROUPS.EUROPE, GROUPS.ASIA, getWatchlist()).filter(isStockSym));
+    if (state.symbol && isStockSym(state.symbol)) set.add(state.symbol);
+    return [...set].slice(0, 48);   // keep within free-tier subscription limits
+  }
+  function connectFinnhubWS(key) {
+    if (!key) return;
+    let ws;
+    try { ws = new WebSocket("wss://ws.finnhub.io?token=" + encodeURIComponent(key)); }
+    catch (e) { setTimeout(() => connectFinnhubWS(key), 8000); return; }
+    ws.onopen = () => finnhubSymbols().forEach((s) => { try { ws.send(JSON.stringify({ type: "subscribe", symbol: s })); } catch (e) {} });
+    ws.onmessage = (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m.type !== "trade" || !Array.isArray(m.data)) return;
+      const seen = {};
+      for (const t of m.data) {                          // keep last price per symbol in this batch
+        if (t && t.s && t.p != null) seen[t.s] = t.p;
+      }
+      for (const sym in seen) {
+        const price = seen[sym], pc = prevCloseMap[sym];
+        if (pc) { const chg = price - pc, pct = chg / pc * 100; applyLiveTick(sym, price, pct, chg); }
+        else { applyLiveTick(sym, price, 0, 0); }
+      }
+    };
+    ws.onclose = () => setTimeout(() => connectFinnhubWS(key), 5000);
     ws.onerror = () => { try { ws.close(); } catch (e) {} };
   }
 
@@ -1203,6 +1235,7 @@
   showView("home");
   loadNews($("#homenews"), "stock market");
   connectBinanceWS();
+  api("/api/config").then((c) => { if (c && c.finnhub) connectFinnhubWS(c.finnhub); }).catch(() => {});
   $("#cmd").focus();
   window.__loadSecurity = loadSecurity; // debug hook
 })();

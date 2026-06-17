@@ -1377,6 +1377,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send_json({"error": "symbols required"}, 400)
                 return self._send_json({"quotes": fetch_quotes(symbols)})
 
+            if path == "/api/config":
+                # expose only the Finnhub key (needed for the browser real-time stock WebSocket)
+                return self._send_json({"finnhub": FH_KEY or ""})
+
             if path == "/api/spark":
                 syms = (qs.get("symbols", [""])[0]).strip()
                 symbols = [s.strip() for s in syms.split(",") if s.strip()]
