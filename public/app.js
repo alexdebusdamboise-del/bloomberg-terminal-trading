@@ -1163,7 +1163,8 @@
   // ---------------- live crypto via Binance WebSocket (real-time ticking) ----------------
   const wsLastPx = {}, wsThrottle = {};
   function binanceStream(sym) { return sym.slice(0, -4).toLowerCase() + "usdt"; }   // BTC-USD -> btcusdt
-  function streamToSym(s) { return s.replace(/USDT$/, "").toUpperCase() + "-USD"; } // BTCUSDT -> BTC-USD
+  // FX majors that Binance streams 24/7 as stablecoin pairs (app symbol -> Binance symbol)
+  const FX_BINANCE = { "EURUSD=X": "EURUSDT", "GBPUSD=X": "GBPUSDT", "AUDUSD=X": "AUDUSDT" };
   function applyLiveTick(sym, price, pct, chg) {
     if (price == null || isNaN(price)) return;
     const now = Date.now();
@@ -1187,32 +1188,54 @@
   }
   function connectBinanceWS() {
     let ws;
+    const map = {};                                            // Binance symbol (upper) -> app symbol
+    GROUPS.CRYPTO.forEach((s) => { map[binanceStream(s).toUpperCase()] = s; });
+    Object.keys(FX_BINANCE).forEach((a) => { map[FX_BINANCE[a]] = a; });
     try {
-      const streams = GROUPS.CRYPTO.map((s) => binanceStream(s) + "@ticker").join("/");
+      const streams = Object.keys(map).map((b) => b.toLowerCase() + "@ticker").join("/");
       ws = new WebSocket("wss://stream.binance.com:9443/stream?streams=" + streams);
     } catch (e) { setTimeout(connectBinanceWS, 8000); return; }
     ws.onmessage = (ev) => {
       let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
       const d = m && m.data; if (!d || !d.s) return;
-      applyLiveTick(streamToSym(d.s), parseFloat(d.c), parseFloat(d.P), parseFloat(d.p));
+      const appSym = map[d.s]; if (!appSym) return;
+      applyLiveTick(appSym, parseFloat(d.c), parseFloat(d.P), parseFloat(d.p));
     };
     ws.onclose = () => setTimeout(connectBinanceWS, 5000);   // auto-reconnect
     ws.onerror = () => { try { ws.close(); } catch (e) {} };
   }
 
-  // ---------------- live stocks via Finnhub WebSocket (US market hours) ----------------
+  // ---------------- live stocks / indices / commodities via Finnhub WebSocket (US market hours) ----------------
   function isStockSym(s) { return /^[A-Z.]{1,6}$/.test(s) && !/-USD$/.test(s); }   // plain US tickers + ADRs (excludes ^index, =X fx, =F futures, rates)
-  function finnhubSymbols() {
-    const set = new Set([].concat(GROUPS.EQUITY, GROUPS.EUROPE, GROUPS.ASIA, getWatchlist()).filter(isStockSym));
-    if (state.symbol && isStockSym(state.symbol)) set.add(state.symbol);
-    return [...set].slice(0, 48);   // keep within free-tier subscription limits
+  // Liquid US ETFs that track an index / commodity 1:1 intraday -> drive the live price of
+  // symbols that have NO free real-time feed (indices & futures). app symbol -> proxy ETF.
+  const PROXY = {
+    "^GSPC": "SPY", "^IXIC": "QQQ", "^NDX": "QQQ", "^DJI": "DIA", "^RUT": "IWM", "^SOX": "SOXX", "^VIX": "VIXY",
+    "GC=F": "GLD", "SI=F": "SLV", "CL=F": "USO", "BZ=F": "BNO", "NG=F": "UNG", "HG=F": "CPER",
+  };
+  const proxyTargets = {};                              // ETF -> [app symbols it drives]
+  Object.keys(PROXY).forEach((a) => { (proxyTargets[PROXY[a]] = proxyTargets[PROXY[a]] || []).push(a); });
+  const proxyPC = {};                                   // ETF -> previous close (for % math)
+  function loadProxyPC(key) {                           // one-time REST snapshot of each proxy's prev close
+    Object.keys(proxyTargets).forEach((etf) => {
+      fetch("https://finnhub.io/api/v1/quote?symbol=" + etf + "&token=" + encodeURIComponent(key))
+        .then((r) => r.json()).then((q) => { if (q && q.pc) proxyPC[etf] = q.pc; }).catch(() => {});
+    });
+  }
+  function finnhubSubs() {                              // proxies (always) + stocks, capped at the free 50-symbol limit
+    const proxies = Object.keys(proxyTargets);
+    const pool = [].concat(state.symbol && isStockSym(state.symbol) ? [state.symbol] : [],
+      GROUPS.EQUITY, getWatchlist(), GROUPS.EUROPE, GROUPS.ASIA).filter(isStockSym);
+    const seen = new Set(proxies), out = proxies.slice();
+    for (const s of pool) { if (out.length >= 50) break; if (!seen.has(s)) { seen.add(s); out.push(s); } }
+    return out;
   }
   function connectFinnhubWS(key) {
     if (!key) return;
     let ws;
     try { ws = new WebSocket("wss://ws.finnhub.io?token=" + encodeURIComponent(key)); }
     catch (e) { setTimeout(() => connectFinnhubWS(key), 8000); return; }
-    ws.onopen = () => finnhubSymbols().forEach((s) => { try { ws.send(JSON.stringify({ type: "subscribe", symbol: s })); } catch (e) {} });
+    ws.onopen = () => finnhubSubs().forEach((s) => { try { ws.send(JSON.stringify({ type: "subscribe", symbol: s })); } catch (e) {} });
     ws.onmessage = (ev) => {
       let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
       if (m.type !== "trade" || !Array.isArray(m.data)) return;
@@ -1221,9 +1244,22 @@
         if (t && t.s && t.p != null) seen[t.s] = t.p;
       }
       for (const sym in seen) {
-        const price = seen[sym], pc = prevCloseMap[sym];
-        if (pc) { const chg = price - pc, pct = chg / pc * 100; applyLiveTick(sym, price, pct, chg); }
-        else { applyLiveTick(sym, price, 0, 0); }
+        const price = seen[sym];
+        if (proxyTargets[sym]) {                          // ETF proxy -> drive its index / commodity live
+          const pc = proxyPC[sym];
+          if (!pc) continue;
+          const pct = (price - pc) / pc * 100;            // proxy's intraday % move
+          for (const appSym of proxyTargets[sym]) {
+            const ap = prevCloseMap[appSym];
+            if (ap == null) continue;
+            const aprice = ap * (1 + pct / 100);          // apply same % to the index/future's own prev close
+            applyLiveTick(appSym, aprice, pct, aprice - ap);
+          }
+        } else {                                          // direct US stock / ADR
+          const pc = prevCloseMap[sym];
+          if (pc) { const chg = price - pc; applyLiveTick(sym, price, chg / pc * 100, chg); }
+          else { applyLiveTick(sym, price, 0, 0); }
+        }
       }
     };
     ws.onclose = () => setTimeout(() => connectFinnhubWS(key), 5000);
@@ -1235,7 +1271,7 @@
   showView("home");
   loadNews($("#homenews"), "stock market");
   connectBinanceWS();
-  api("/api/config").then((c) => { if (c && c.finnhub) connectFinnhubWS(c.finnhub); }).catch(() => {});
+  api("/api/config").then((c) => { if (c && c.finnhub) { loadProxyPC(c.finnhub); connectFinnhubWS(c.finnhub); } }).catch(() => {});
   $("#cmd").focus();
   window.__loadSecurity = loadSecurity; // debug hook
 })();
