@@ -1455,6 +1455,26 @@ class Handler(BaseHTTPRequestHandler):
                 # live intraday % of European local listings (drives the ADR rows)
                 return self._send_json(fetch_eulive())
 
+            if path == "/api/diag":
+                # connectivity probe (which crypto sources are reachable from this host)
+                res = {}
+                probes = [
+                    ("binance_com", "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"),
+                    ("binance_vision", "https://data-api.binance.vision/api/v3/ticker/price?symbol=BTCUSDT"),
+                    ("coingecko", "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"),
+                ]
+                for name, u in probes:
+                    try:
+                        req = urllib.request.Request(u, headers={"User-Agent": UA})
+                        with urllib.request.urlopen(req, timeout=10) as r:
+                            res[name] = {"status": r.status, "body": r.read(160).decode("utf-8", "replace")}
+                    except urllib.error.HTTPError as e:
+                        res[name] = {"error": "HTTP %s" % e.code,
+                                     "body": e.read(160).decode("utf-8", "replace")}
+                    except Exception as e:
+                        res[name] = {"error": str(e)[:160]}
+                return self._send_json(res)
+
             if path == "/api/spark":
                 syms = (qs.get("symbols", [""])[0]).strip()
                 symbols = [s.strip() for s in syms.split(",") if s.strip()]
