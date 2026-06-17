@@ -137,6 +137,54 @@ def _yahoo_json(path_and_query, jar=None, retries=3):
 
 
 # ---------------------------------------------------------------------------
+# European live quotes. Finnhub & Twelve Data free tiers don't cover EU
+# exchanges, so we read each company's *local* listing from CNBC (key-less, no
+# IP-blocking, one batched request) and expose only its intraday % move. The
+# frontend applies that % to the matching US-listed ADR's previous close (ADR
+# and local listing track 1:1 intraday, FX aside), so the "Europe" panel ticks
+# during the European cash session. Currency is irrelevant — only the % is used.
+# ---------------------------------------------------------------------------
+EU_CNBC = {
+    "ASML": "ASML-NL", "SAP": "SAP-DE", "NVS": "NOVN-CH", "AZN": "AZN-GB",
+    "SHEL": "SHEL-GB", "HSBC": "HSBA-GB", "TTE": "TTE-FR", "UL": "ULVR-GB",
+    "DEO": "DGE-GB", "RIO": "RIO-GB", "BHP": "BHP-GB", "SAN": "SAN-ES",
+    "UBS": "UBSG-CH", "ING": "INGA-NL", "GSK": "GSK-GB", "SNY": "SAN-FR",
+    "SIEGY": "SIE-DE", "LVMUY": "MC-FR", "NSRGY": "NESN-CH", "RHHBY": "RO-CH",
+    "MBGYY": "MBG-DE", "VWAGY": "VOW3-DE", "ALIZY": "ALV-DE", "BUD": "ABI-BE",
+    "RELX": "REL-GB", "STLA": "STLAM-IT", "DB": "DBK-DE",
+    # NVO (Novo Nordisk): no CNBC EU listing found; covered by Finnhub in US hours.
+    # ARM, SPOT are primarily US-listed -> already covered live by Finnhub.
+}
+
+
+def fetch_eulive():
+    """{ADR: {pct, live}} for European names, from their local CNBC listing."""
+    cached = CACHE.get("eulive")
+    if cached is not None:
+        return cached
+    out = {}
+    rev = {c: adr for adr, c in EU_CNBC.items()}
+    try:
+        data = _cnbc_get("|".join(EU_CNBC.values()))
+        qq = (data.get("QuickQuoteResult", {}) or {}).get("QuickQuote", [])
+        if isinstance(qq, dict):
+            qq = [qq]
+        for q in qq:
+            adr = rev.get(q.get("symbol"))
+            if not adr:
+                continue
+            pct = _f(q.get("change_pct"))
+            last = _f(q.get("last"))
+            if pct is None or last is None:
+                continue
+            out[adr] = {"pct": round(pct, 3), "live": q.get("curmktstatus") == "REG_MKT"}
+    except Exception:
+        pass
+    CACHE.set("eulive", out, 8)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Crumb / auth manager (for fundamentals + batch quotes). Graceful: if it
 # cannot get a crumb (rate limited, etc.) callers fall back to chart-derived
 # data and the UI degrades cleanly.
@@ -1000,6 +1048,28 @@ def fetch_quotes(symbols):
                     out[s] = fut.result()
                 except Exception:
                     out[s] = {"symbol": s, "error": True}
+    # 4) European names: during the EU cash session the ADR's US quote is stale
+    # (pre-market until 15:30 Paris), so drive its price/% from the live local
+    # listing — keeps the row consistent and ticking with the European session.
+    eu_syms = [s for s in symbols if s in EU_CNBC]
+    if eu_syms:
+        try:
+            eul = fetch_eulive()
+        except Exception:
+            eul = {}
+        for s in eu_syms:
+            info = eul.get(s)
+            q = out.get(s)
+            if not info or not info.get("live") or not q:
+                continue
+            prev = q.get("previousClose")
+            if prev is None:
+                continue
+            price = prev * (1 + info["pct"] / 100.0)
+            q["price"] = round(price, 4)
+            q["changePct"] = info["pct"]
+            q["change"] = round(price - prev, 4)
+            q["source"] = "live-eu"
     ordered = [out[s] for s in symbols if s in out]
     CACHE.set(key, ordered, 3)
     return ordered
@@ -1380,6 +1450,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/config":
                 # expose only the Finnhub key (needed for the browser real-time stock WebSocket)
                 return self._send_json({"finnhub": FH_KEY or ""})
+
+            if path == "/api/eulive":
+                # live intraday % of European local listings (drives the ADR rows)
+                return self._send_json(fetch_eulive())
 
             if path == "/api/spark":
                 syms = (qs.get("symbols", [""])[0]).strip()

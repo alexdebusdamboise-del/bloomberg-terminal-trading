@@ -1266,12 +1266,32 @@
     ws.onerror = () => { try { ws.close(); } catch (e) {} };
   }
 
+  // ---------------- live European stocks via local listing (Yahoo, EU session) ----------------
+  // Finnhub/TD free don't cover EU exchanges; the server reads each name's local
+  // listing % move and we apply it to the ADR's previous close so the Europe panel
+  // ticks during the European cash session. Adaptive cadence: fast when live, slow when shut.
+  let euLiveTimer = null;
+  function runEuLive() {
+    api("/api/eulive").then((m) => {
+      let anyLive = false;
+      if (m) for (const adr in m) {
+        const info = m[adr]; if (!info || !info.live) continue;
+        anyLive = true;
+        const pc = prevCloseMap[adr]; if (pc == null) continue;
+        const price = pc * (1 + info.pct / 100);
+        applyLiveTick(adr, price, info.pct, price - pc);
+      }
+      clearTimeout(euLiveTimer); euLiveTimer = setTimeout(runEuLive, anyLive ? 10000 : 60000);
+    }).catch(() => { clearTimeout(euLiveTimer); euLiveTimer = setTimeout(runEuLive, 60000); });
+  }
+
   // ---------------- boot ----------------
   buildChartControls();
   showView("home");
   loadNews($("#homenews"), "stock market");
   connectBinanceWS();
   api("/api/config").then((c) => { if (c && c.finnhub) { loadProxyPC(c.finnhub); connectFinnhubWS(c.finnhub); } }).catch(() => {});
+  setTimeout(runEuLive, 1500);   // start after the first grid load populates prev-close map
   $("#cmd").focus();
   window.__loadSecurity = loadSecurity; // debug hook
 })();
