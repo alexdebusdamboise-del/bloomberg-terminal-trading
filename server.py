@@ -453,17 +453,30 @@ def _synth_chart(symbol, rng="6mo", interval="1d"):
     }
 
 
-# US indices have no free deep-history feed that works from datacenter IPs
-# (Yahoo 429s, Stooq is bot-walled, Twelve Data gates indices behind a paid
-# plan). These ETFs track their index ~1:1 intraday with negligible drift, so
-# we pull the ETF's deep history from Twelve Data and rescale it by a constant
-# ratio = current index level / ETF last close. Accurate to ~1%.
-CHART_PROXY = {"^GSPC": "SPY", "^IXIC": "QQQ", "^NDX": "QQQ", "^DJI": "DIA",
-               "^RUT": "IWM", "^SOX": "SOXX"}
+# Indices have no free deep-history feed that works from datacenter IPs (Yahoo
+# 429s, Stooq is bot-walled, Twelve Data gates indices behind a paid plan). We
+# chart them from a tracking ETF (deep history on TD's free tier) rescaled by a
+# constant ratio = current index level / ETF last close.
+#   - US indices: ETF tracks ~1:1, accurate to ~1%.
+#   - International: the US-listed country ETF is USD-priced, so we divide its
+#     history by the historical FX rate to recover the local-currency *shape*
+#     before rescaling (residual error from total-return vs price-return indices
+#     and ETF tracking remains — levels are approximate, the trend is real).
+# Map: index -> (ETF, fx symbol or None, invert) where USD-per-local X = fx value
+# (invert=False) or 1/fx value (invert=True).
+# Only US indices are included: their price ETFs track the (price-return) index
+# in the same currency to ~1%. International country ETFs were evaluated and
+# rejected — methodology and total-return mismatches put historical levels off
+# by 30%-140% (e.g. DAX 2.4x, Nikkei 1.9x), too inaccurate to present as real.
+# Accurate international indices need a paid feed (e.g. Twelve Data Grow).
+INDEX_PROXY = {
+    "^GSPC": ("SPY", None, False), "^IXIC": ("QQQ", None, False), "^NDX": ("QQQ", None, False),
+    "^DJI": ("DIA", None, False), "^RUT": ("IWM", None, False), "^SOX": ("SOXX", None, False),
+}
 
 
-def _proxy_chart(symbol, rng, interval, full):
-    etf = CHART_PROXY[symbol]
+def _index_chart(symbol, rng, interval, full):
+    etf, fxsym, invert = INDEX_PROXY[symbol]
     if full:
         td_int, outsize = YINT_TO_TD.get(interval, "1day"), 5000
     else:
@@ -471,7 +484,28 @@ def _proxy_chart(symbol, rng, interval, full):
     td = _twelvedata_chart(etf, etf, td_int, outsize)
     if not td or not td.get("candles"):
         return None
-    candles = td["candles"]
+    candles = sorted(td["candles"], key=lambda c: c["t"])
+    # FX-adjust the historical shape for non-USD indices (daily+; intraday FX
+    # barely moves so we skip it). Graceful: if FX is unavailable, keep the
+    # USD-priced shape rather than failing.
+    if fxsym and interval in ("1d", "1wk", "1mo"):
+        try:
+            fx = _twelvedata_chart(fxsym, _td_symbol(fxsym), td_int, outsize)
+        except Exception:
+            fx = None
+        if fx and fx.get("candles"):
+            fxmap = {time.strftime("%Y-%m-%d", time.gmtime(fc["t"])): fc["c"]
+                     for fc in fx["candles"] if fc.get("c")}
+            last_x = None
+            for c in candles:
+                v = fxmap.get(time.strftime("%Y-%m-%d", time.gmtime(c["t"]))) or last_x
+                if not v:
+                    continue
+                last_x = v
+                X = v if not invert else (1.0 / v)
+                if X:
+                    for k in ("o", "h", "l", "c"):
+                        c[k] = c[k] / X
     etf_last = candles[-1]["c"]
     idx_now = None
     try:
@@ -487,6 +521,7 @@ def _proxy_chart(symbol, rng, interval, full):
         c["o"] = round(c["o"] * ratio, 2); c["h"] = round(c["h"] * ratio, 2)
         c["l"] = round(c["l"] * ratio, 2); c["c"] = round(c["c"] * ratio, 2)
         c["v"] = 0
+    td["candles"] = candles
     td["symbol"] = symbol
     td["shortName"] = symbol
     td["exchangeName"] = "Index"
@@ -522,8 +557,8 @@ def fetch_chart(symbol, rng="6mo", interval="1d", use_provider=False, full=False
                 CACHE.set(key, c, 60 if rng in ("1d", "5d") else 180)
                 return c
     # 0b) indices with no free direct feed -> rescaled ETF proxy (deep history).
-    if use_provider and TD_KEY and symbol in CHART_PROXY:
-        pr = _proxy_chart(symbol, rng, interval, full)
+    if use_provider and TD_KEY and symbol in INDEX_PROXY:
+        pr = _index_chart(symbol, rng, interval, full)
         if pr and len(pr.get("candles") or []) > 2:
             CACHE.set(key, pr, 60 if rng in ("1d", "5d") else 180)
             return pr
