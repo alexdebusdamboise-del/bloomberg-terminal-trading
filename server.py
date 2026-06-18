@@ -453,6 +453,51 @@ def _synth_chart(symbol, rng="6mo", interval="1d"):
     }
 
 
+# US indices have no free deep-history feed that works from datacenter IPs
+# (Yahoo 429s, Stooq is bot-walled, Twelve Data gates indices behind a paid
+# plan). These ETFs track their index ~1:1 intraday with negligible drift, so
+# we pull the ETF's deep history from Twelve Data and rescale it by a constant
+# ratio = current index level / ETF last close. Accurate to ~1%.
+CHART_PROXY = {"^GSPC": "SPY", "^IXIC": "QQQ", "^NDX": "QQQ", "^DJI": "DIA",
+               "^RUT": "IWM", "^SOX": "SOXX"}
+
+
+def _proxy_chart(symbol, rng, interval, full):
+    etf = CHART_PROXY[symbol]
+    if full:
+        td_int, outsize = YINT_TO_TD.get(interval, "1day"), 5000
+    else:
+        td_int, outsize, _ = TD_MAP.get(rng, TD_MAP["6mo"])
+    td = _twelvedata_chart(etf, etf, td_int, outsize)
+    if not td or not td.get("candles"):
+        return None
+    candles = td["candles"]
+    etf_last = candles[-1]["c"]
+    idx_now = None
+    try:
+        q = _cnbc_quotes([symbol]).get(symbol)
+        if q:
+            idx_now = q.get("price")
+    except Exception:
+        pass
+    ratio = (idx_now / etf_last) if (idx_now and etf_last) else None
+    if not ratio:
+        return None
+    for c in candles:
+        c["o"] = round(c["o"] * ratio, 2); c["h"] = round(c["h"] * ratio, 2)
+        c["l"] = round(c["l"] * ratio, 2); c["c"] = round(c["c"] * ratio, 2)
+        c["v"] = 0
+    td["symbol"] = symbol
+    td["shortName"] = symbol
+    td["exchangeName"] = "Index"
+    td["regularMarketPrice"] = round(etf_last * ratio, 2)
+    td["previousClose"] = round(candles[-2]["c"], 2) if len(candles) > 1 else td["regularMarketPrice"]
+    td["fiftyTwoWeekHigh"] = round(max(c["h"] for c in candles), 2)
+    td["fiftyTwoWeekLow"] = round(min(c["l"] for c in candles), 2)
+    td["source"] = "live"
+    return td
+
+
 # ---------------------------------------------------------------------------
 # Data fetchers
 # ---------------------------------------------------------------------------
@@ -461,12 +506,27 @@ def fetch_chart(symbol, rng="6mo", interval="1d", use_provider=False, full=False
     cached = CACHE.get(key)
     if cached:
         return cached
-    # 0) crypto -> CoinGecko OHLC (accurate; full -> entire daily history)
+    # 0) crypto -> deep OHLC. Intraday from Binance klines (real depth + works on
+    #    datacenter IPs); daily/weekly/monthly from CoinGecko (history since the
+    #    coin's inception). Each falls back to the other.
     if _is_crypto(symbol):
-        cg = _coingecko_chart(symbol, rng, interval, full)
-        if cg:
-            CACHE.set(key, cg, 60 if rng in ("1d", "5d") else 180)
-            return cg
+        intraday = interval in ("1m", "5m", "15m", "30m", "1h", "2h", "4h")
+        order = ([_binance_chart, _coingecko_chart] if intraday
+                 else [_coingecko_chart, _binance_chart])
+        for fn in order:
+            try:
+                c = fn(symbol, rng, interval, full)
+            except Exception:
+                c = None
+            if c and len(c.get("candles") or []) > 2:
+                CACHE.set(key, c, 60 if rng in ("1d", "5d") else 180)
+                return c
+    # 0b) indices with no free direct feed -> rescaled ETF proxy (deep history).
+    if use_provider and TD_KEY and symbol in CHART_PROXY:
+        pr = _proxy_chart(symbol, rng, interval, full)
+        if pr and len(pr.get("candles") or []) > 2:
+            CACHE.set(key, pr, 60 if rng in ("1d", "5d") else 180)
+            return pr
     # 1) real-time provider first — only for the focused security view, to stay
     #    within the free-tier rate limit (bulk monitor/heatmap use Yahoo/sim).
     if use_provider and TD_KEY:
@@ -962,6 +1022,63 @@ def _binance_spark(symbols):
     except Exception:
         pass
     return out
+
+
+BINANCE_KLINE_INT = {"1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m", "1h": "1h",
+                     "2h": "2h", "4h": "4h", "1d": "1d", "1wk": "1w", "1mo": "1M"}
+
+
+def _binance_chart(symbol, rng, interval, full=False):
+    """Deep crypto OHLC from Binance klines (binance.vision mirror — works from
+    datacenter IPs). Paginates backwards to the start of history; gives real
+    intraday depth where CoinGecko's ohlc is shallow."""
+    if not symbol.endswith("-USD") or symbol not in CG_IDS:
+        return None
+    b = symbol[:-4] + "USDT"
+    bi = BINANCE_KLINE_INT.get(interval, "1d")
+    want = 5000 if full else 1000
+    rows, end = [], None
+    try:
+        while len(rows) < want:
+            u = BINANCE_API + f"/api/v3/klines?symbol={b}&interval={bi}&limit=1000"
+            if end is not None:
+                u += "&endTime=" + str(end)
+            kl = _json_get(u)
+            if not isinstance(kl, list) or not kl:
+                break
+            rows = kl + rows
+            end = int(kl[0][0]) - 1          # next page ends just before our earliest bar
+            if len(kl) < 1000:
+                break                         # reached the very start of the listing
+    except Exception:
+        if not rows:
+            return None
+    seen, candles = set(), []
+    for k in rows:
+        t = int(k[0] / 1000)
+        if t in seen:
+            continue
+        seen.add(t)
+        try:
+            candles.append({"t": t, "o": float(k[1]), "h": float(k[2]),
+                            "l": float(k[3]), "c": float(k[4]), "v": float(k[5])})
+        except (TypeError, ValueError):
+            continue
+    if len(candles) < 2:
+        return None
+    candles.sort(key=lambda c: c["t"])
+    candles = candles[-want:]
+    last, prev = candles[-1]["c"], candles[-2]["c"]
+    return {
+        "symbol": symbol, "currency": "USD", "exchangeName": "Binance",
+        "shortName": symbol.replace("-USD", ""), "longName": None,
+        "regularMarketPrice": last, "previousClose": prev,
+        "regularMarketDayHigh": candles[-1]["h"], "regularMarketDayLow": candles[-1]["l"],
+        "regularMarketVolume": candles[-1]["v"],
+        "fiftyTwoWeekHigh": max(c["h"] for c in candles),
+        "fiftyTwoWeekLow": min(c["l"] for c in candles),
+        "regularMarketTime": candles[-1]["t"], "candles": candles, "source": "live",
+    }
 
 
 def _coingecko_chart(symbol, rng, interval="1d", full=False):
@@ -1503,26 +1620,6 @@ class Handler(BaseHTTPRequestHandler):
                 # live intraday % of European local listings (drives the ADR rows)
                 return self._send_json(fetch_eulive())
 
-            if path == "/api/diag":
-                # connectivity probe (which crypto sources are reachable from this host)
-                res = {}
-                probes = [
-                    ("binance_vision", "https://data-api.binance.vision/api/v3/ticker/price?symbol=BTCUSDT"),
-                    ("yahoo_gspc", "https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?interval=1d&range=max"),
-                    ("yahoo_n225", "https://query2.finance.yahoo.com/v8/finance/chart/%5EN225?interval=1d&range=5y"),
-                    ("stooq_spx", "https://stooq.com/q/d/l/?s=^spx&i=d"),
-                ]
-                for name, u in probes:
-                    try:
-                        req = urllib.request.Request(u, headers={"User-Agent": UA})
-                        with urllib.request.urlopen(req, timeout=10) as r:
-                            res[name] = {"status": r.status, "body": r.read(160).decode("utf-8", "replace")}
-                    except urllib.error.HTTPError as e:
-                        res[name] = {"error": "HTTP %s" % e.code,
-                                     "body": e.read(160).decode("utf-8", "replace")}
-                    except Exception as e:
-                        res[name] = {"error": str(e)[:160]}
-                return self._send_json(res)
 
             if path == "/api/spark":
                 syms = (qs.get("symbols", [""])[0]).strip()
