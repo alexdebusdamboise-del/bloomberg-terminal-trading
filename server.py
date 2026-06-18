@@ -1507,9 +1507,10 @@ class Handler(BaseHTTPRequestHandler):
                 # connectivity probe (which crypto sources are reachable from this host)
                 res = {}
                 probes = [
-                    ("binance_com", "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"),
                     ("binance_vision", "https://data-api.binance.vision/api/v3/ticker/price?symbol=BTCUSDT"),
-                    ("coingecko", "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"),
+                    ("yahoo_gspc", "https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?interval=1d&range=max"),
+                    ("yahoo_n225", "https://query2.finance.yahoo.com/v8/finance/chart/%5EN225?interval=1d&range=5y"),
+                    ("stooq_spx", "https://stooq.com/q/d/l/?s=^spx&i=d"),
                 ]
                 for name, u in probes:
                     try:
