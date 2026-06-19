@@ -292,6 +292,60 @@
       window.addEventListener("mouseup", () => { if (this._dragging) { this._dragging = false; c.style.cursor = "crosshair"; } });
       // double-click = reset to the range's default window with a right margin
       c.addEventListener("dblclick", () => { this._resetView(this.candles.length, this._lastVB); this.render(); });
+
+      // ---- touch (mobile / tablet): 1-finger horizontal = pan, pinch = zoom,
+      //      1-finger vertical = let the page scroll, double-tap = reset ----
+      let tMode = null, pinchD0 = 0, pinchSpan0 = 0, pinchFrac = 0.5, pinchPos = 0;
+      const dist2 = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+      c.addEventListener("touchstart", (e) => {
+        if (!this.candles.length) return;
+        if (e.touches.length === 1) {
+          tMode = null;
+          this._tX = e.touches[0].clientX; this._tY = e.touches[0].clientY;
+          this._dragRight = this.viewRight;
+        } else if (e.touches.length === 2) {
+          tMode = "zoom";
+          pinchD0 = dist2(e.touches); pinchSpan0 = this.viewSpan;
+          const r = c.getBoundingClientRect(), L = this._layout();
+          const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+          pinchFrac = Math.max(0, Math.min(1, (midX - r.left - L.plotLeft) / Math.max(1, L.plotRight - L.plotLeft)));
+          pinchPos = (this.viewRight - this.viewSpan) + pinchFrac * this.viewSpan;
+        }
+      }, { passive: true });
+      c.addEventListener("touchmove", (e) => {
+        if (!this.candles.length) return;
+        const L = this._layout(), plotW = Math.max(1, L.plotRight - L.plotLeft);
+        if (e.touches.length >= 2 && tMode === "zoom") {
+          e.preventDefault();
+          const d = dist2(e.touches);
+          if (d > 0) {
+            this.viewSpan = pinchSpan0 * (pinchD0 / d);          // pinch apart -> zoom in
+            this.viewRight = pinchPos + (1 - pinchFrac) * this.viewSpan;
+            this._clampView(); this.render();
+          }
+          return;
+        }
+        if (e.touches.length === 1) {
+          const dx = e.touches[0].clientX - this._tX, dy = e.touches[0].clientY - this._tY;
+          if (tMode === null) {
+            if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;    // wait for a clear direction
+            tMode = Math.abs(dx) > Math.abs(dy) ? "pan" : "scroll";
+          }
+          if (tMode === "pan") {
+            e.preventDefault();
+            this.viewRight = this._dragRight + dx / plotW * this.viewSpan;
+            this._clampView(); this.render();
+          }
+        }
+      }, { passive: false });
+      c.addEventListener("touchend", (e) => {
+        if (tMode === null && (!e.touches || e.touches.length === 0)) {   // a tap -> double-tap resets
+          const now = Date.now();
+          if (now - (this._lastTap || 0) < 300) { this._resetView(this.candles.length, this._lastVB); this.render(); }
+          this._lastTap = now;
+        }
+        if (!e.touches || e.touches.length === 0) tMode = null;
+      });
     }
 
     _resetView(n, vb) {

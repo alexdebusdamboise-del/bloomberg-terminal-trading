@@ -188,7 +188,7 @@ button{font-family:var(--mono);cursor:pointer;}
 .panel-secnews{grid-area:news;}
 
 .chart-wrap{flex:1;position:relative;min-height:0;}
-#chart{display:block;width:100%;height:100%;}
+#chart{display:block;width:100%;height:100%;touch-action:pan-y;}
 .chart-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:flex-end;}
 .rngs button,.ctypes button,.cmas button,.cinds button{background:#161616;color:var(--text-dim);border:1px solid var(--border);
   font-size:10px;padding:1px 6px;margin-left:2px;border-radius:2px;}
@@ -247,7 +247,7 @@ button{font-family:var(--mono);cursor:pointer;}
 .comp-ranges button.active{background:var(--amber);color:#000;border-color:var(--amber);font-weight:700;}
 .panel-comp{flex:1;margin:6px;min-height:0;}
 .comp-wrap{flex:1;position:relative;min-height:0;}
-#compchart{display:block;width:100%;height:100%;}
+#compchart{display:block;width:100%;height:100%;touch-action:pan-y;}
 
 /* ---------- STATUS BAR ---------- */
 #statusbar{display:flex;align-items:center;justify-content:space-between;gap:12px;
@@ -376,6 +376,7 @@ kbd{background:#161616;border:1px solid var(--border);border-radius:3px;padding:
   .ks-row .v,.sh-last,.sh-chg{color:#000;}
 }
 
+/* ---- TABLET (iPad): two-column home, stacked security view ---- */
 @media (max-width:1100px){
   .grid-home{grid-template-columns:repeat(2,1fr);grid-template-rows:repeat(6,minmax(200px,1fr));
     grid-template-areas:"idx eq" "eu asia" "fx cry" "cmd rts" "wch wch" "news news";overflow:auto;}
@@ -383,4 +384,59 @@ kbd{background:#161616;border:1px solid var(--border);border-radius:3px;padding:
     grid-template-rows:340px minmax(200px,auto) minmax(200px,auto) minmax(200px,auto);
     grid-template-areas:"chart" "stats" "news" "profile";overflow:auto;}
   .panel-chart{min-height:340px;}
+}
+
+/* ---- PHONE: single column, wrapping top bar, touch-friendly ---- */
+@media (max-width:680px){
+  body{font-size:12.5px;}
+
+  /* top bar wraps onto two rows so nothing gets clipped */
+  #topbar{flex-wrap:wrap;height:auto;min-height:34px;padding:5px 8px;gap:6px;}
+  .brand{font-size:13px;letter-spacing:1px;}
+  #cmdform{order:3;flex:1 1 100%;height:28px;}
+  .topinfo{margin-left:auto;gap:10px;}
+  .status{display:none;}
+
+  /* sector bar already scrolls sideways — just bigger tap targets */
+  #sectorbar{height:34px;padding:0 6px;}
+  .sk{height:26px;line-height:24px;padding:0 13px;font-size:11px;}
+
+  /* HOME: one column; each panel a fixed height with its own inner scroll */
+  .grid-home{display:flex;flex-direction:column;gap:6px;padding:6px;overflow-y:auto;overflow-x:hidden;}
+  .grid-home .panel{flex:0 0 auto;height:42vh;min-height:280px;}
+  .panel-news{height:auto;min-height:60vh;}
+  .qrow,.qrow-head{padding-top:7px;padding-bottom:7px;}
+  #watchadd{width:120px;}
+  #watchac{width:200px;}
+
+  /* SECURITY view: stacked header, single-column scrolling body */
+  .sec-header{flex-wrap:wrap;}
+  .sh-id{min-width:0;flex:1 1 100%;border-right:none;border-bottom:1px solid var(--border);}
+  .sh-name{max-width:none;}
+  .sh-price{min-width:0;flex:1 1 50%;border-bottom:1px solid var(--border);}
+  .sh-last{font-size:22px;}
+  .sh-actions{flex-direction:row;flex:1 1 50%;border-left:none;border-bottom:1px solid var(--border);justify-content:flex-start;flex-wrap:wrap;}
+  .sh-stats{flex:1 1 100%;grid-template-columns:repeat(2,1fr);}
+  .sh-stat{border-right:1px solid var(--border2);}
+
+  .grid-sec{display:flex;flex-direction:column;gap:6px;padding:6px;overflow-y:auto;}
+  .grid-sec .panel{flex:0 0 auto;}
+  .panel-chart{height:auto;min-height:320px;}
+  .panel-stats,.panel-profile,.panel-secnews{min-height:240px;}
+  .chart-controls{justify-content:flex-start;gap:6px;}
+  .rngs button,.ctypes button,.cmas button,.cinds button{padding:3px 8px;font-size:11px;}
+
+  /* wide data tables -> horizontal scroll rather than crushing the columns */
+  .screen-table-wrap,.tech-table{overflow:auto;}
+  .scr-row,.scr-head{min-width:620px;}
+  .tech-row,.tech-head{min-width:360px;}
+  .tech-grid{grid-template-columns:1fr;}
+
+  /* compare */
+  #compform{min-width:0;flex:1 1 100%;}
+
+  /* dialogs / toasts fit small screens */
+  .overlay-box{width:96vw;max-height:88vh;}
+  #toast{left:8px;right:8px;}
+  .toast{min-width:0;}
 }
